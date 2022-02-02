@@ -1,0 +1,840 @@
+// Copyright (C) 2022 Alibaba Cloud. All rights reserved.
+// Copyright 2022 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// SPDX-License-Identifier: Apache-2
+
+//! An interval tree implementation specialized for VMM resource management.
+//!
+//! It's not designed as a generic interval tree, but specialized for VMM resource management.
+//!
+//! # Examples
+//! ```rust
+//! extern crate vm_allocator;
+//! use vm_allocator::{IntervalTree, Range, Constraint, RangeState};
+//!
+//! // Create an interval tree and add available resources.
+//! let mut tree = IntervalTree::<u64>::new();
+//! tree.insert(Range::new(0x100u64, 0x100u64), None);
+//! tree.insert(Range::new(0x200u64, 0x2ffu64), None);
+//!
+//! // Allocate a range with constraints.
+//! let mut constraint = Constraint::new(8u64);
+//! constraint.min = 0x211;
+//! constraint.max = 0x21f;
+//! constraint.align = 0x8;
+//!
+//! let key = tree.allocate(&constraint);
+//! assert_eq!(key, Some(Range::new(0x218u64, 0x21fu64)));
+//! let val = tree.get(&Range::new(0x218u64, 0x21fu64));
+//! assert_eq!(val, Some(RangeState::Allocated));
+//!
+//! // Associate data with the allocated range and mark the range as occupied.
+//! // Note: caller needs to protect from concurrent access between allocate() and the first call
+//! // to update() to mark range as occupied.
+//! let old = tree.update(&Range::new(0x218u64, 0x21fu64), 2);
+//! assert_eq!(old, None);
+//! let old = tree.update(&Range::new(0x218u64, 0x21fu64), 3);
+//! assert_eq!(old, Some(2));
+//! let val = tree.get(&Range::new(0x218u64, 0x21fu64));
+//! assert_eq!(val, Some(RangeState::Valued(&3)));
+//!
+//! // Free allocated resource.
+//! let old = tree.free(key.as_ref().unwrap());
+//! assert_eq!(old, Some(3));
+//!
+//! ```
+
+use crate::address_allocator::Constraint;
+use crate::Error;
+use crate::Result;
+use std::cmp::{max, min, Ordering};
+
+/// Policy for resource allocation.
+#[derive(Copy, Clone, Debug)]
+pub enum AllocPolicy {
+    /// Allocate from the first matched entry.
+    FirstMatch,
+    /// Allocate first matched entry from the end of the range.
+    LastMatch,
+    // u64ries to allocate a memory slot starting with the specified addrres
+    // if it is not available returns error.
+    // ExactMatch,
+}
+
+impl Default for AllocPolicy {
+    fn default() -> Self {
+        AllocPolicy::FirstMatch
+    }
+}
+
+/// A closed interval range [min, max].
+#[allow(missing_docs)]
+#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Hash)]
+pub struct Range {
+    pub min: u64,
+    pub max: u64,
+}
+
+impl std::fmt::Debug for Range {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "[ {:016x}, {:016x} ]", self.min, self.max)
+    }
+}
+
+impl Range {
+    /// Create a new Range object.
+    ///
+    pub fn new(min: u64, max: u64) -> Result<Self> {
+        if min > max || (min == 0 && max == std::u64::MAX) {
+            return Err(Error::InvalidRange(min, max));
+        }
+        Ok(Range { min: min, max: max })
+    }
+
+    /// Create a new Range object.
+    pub fn with_size(base: u64, size: u64) -> Result<Self> {
+        let max = size.checked_add(base).unwrap();
+        if base > max || (base == 0 && max == std::u64::MAX) {
+            return Err(Error::InvalidRange(base, max));
+        }
+        Ok(Range {
+            min: base,
+            max: max,
+        })
+    }
+
+    /// Get length of the range.
+    pub fn len(&self) -> u64 {
+        self.max - self.min + 1
+    }
+
+    /// Check whether two Range objects intersect with each other.
+    pub fn intersect(&self, other: &Range) -> bool {
+        max(self.min, other.min) <= min(self.max, other.max)
+    }
+
+    /// Check whether the key is fully covered.
+    pub fn contain(&self, other: &Range) -> bool {
+        self.min <= other.min && self.max >= other.max
+    }
+
+    /// Create a new Range object with min aligned to `align`.
+    ///
+    /// # Examples
+    /// ```rust
+    /// extern crate vm_allocator;
+    /// use vm_allocator::Range;
+    ///
+    /// let a = Range::new(2u64, 6u64);
+    /// assert_eq!(a.align_forward(0), Some(Range::new(2u64, 6u64)));
+    /// assert_eq!(a.align_forward(1), Some(Range::new(2u64, 6u64)));
+    /// assert_eq!(a.align_forward(2), Some(Range::new(2u64, 6u64)));
+    /// assert_eq!(a.align_forward(4), Some(Range::new(4u64, 6u64)));
+    /// assert_eq!(a.align_forward(8), None);
+    /// assert_eq!(a.align_forward(3), None);
+    /// let b = Range::new(2u64, 2u64);
+    /// assert_eq!(b.align_forward(2), Some(Range::new(2u64, 2u64)));
+    /// ```
+    pub fn align_forward(&self, align: u64) -> Option<Range> {
+        match align {
+            0 | 1 => Some(*self),
+            _ => {
+                if align & (align - 1) != 0 {
+                    return None;
+                }
+                if let Some(min) = self.min.checked_add(align - 1).map(|v| v & !(align - 1)) {
+                    if min <= self.max {
+                        return Range::new(min, self.max).ok();
+                    }
+                }
+                None
+            }
+        }
+    }
+
+    pub fn align_back(&self, align: u64, size: u64) -> Result<Range> {
+        let mut candidate_address = self.max.checked_sub(size).unwrap() + 1;
+        candidate_address = (candidate_address / align) * align;
+        if candidate_address >= self.min {
+            return Ok(Range::new(candidate_address, candidate_address + size)?);
+        }
+        return Err(Error::UnalignedAddress);
+    }
+}
+
+impl Ord for Range {
+    fn cmp(&self, other: &Self) -> Ordering {
+        match self.min.cmp(&other.min) {
+            Ordering::Equal => self.max.cmp(&other.max),
+            res => res,
+        }
+    }
+}
+
+/// Node state for interval tree nodes.
+///
+/// Valid state transition:
+/// - None -> Free: IntervalTree::insert()
+/// - None -> Valued: IntervalTree::insert()
+/// - Free -> Allocated: IntervalTree::allocate()
+/// - Allocated -> Valued(T): IntervalTree::update()
+/// - Valued -> Valued(T): IntervalTree::update()
+/// - Allocated -> Free: IntervalTree::free()
+/// - Valued(T) -> Free: IntervalTree::free()
+/// - * -> None: IntervalTree::delete()
+#[derive(Clone, Copy, Debug, PartialEq, PartialOrd, Eq, Ord)]
+pub enum NodeState {
+    /// Node is free
+    Free,
+    /// Node is allocated but without associated data
+    Allocated,
+}
+
+impl NodeState {
+    fn take(&mut self) -> Self {
+        std::mem::replace(self, NodeState::Free)
+    }
+
+    fn replace(&mut self, value: NodeState) -> Self {
+        std::mem::replace(self, value)
+    }
+
+    pub(crate) fn is_free(&self) -> bool {
+        *self == NodeState::Free
+    }
+}
+
+/// Internal tree node to implement interval tree.
+#[derive(Debug, PartialEq)]
+pub(crate) struct InnerNode {
+    /// Interval handled by this node.
+    pub(crate) key: Range,
+    /// Optional contained data, None if the node is free.
+    pub(crate) node_state: NodeState,
+    /// Optional left child of current node.
+    pub(crate) left: Option<Box<InnerNode>>,
+    /// Optional right child of current node.
+    pub(crate) right: Option<Box<InnerNode>>,
+    /// Cached height of the node.
+    pub(crate) height: u64,
+    /// Cached maximum valued covered by this node.
+    pub(crate) max_key: u64,
+}
+
+impl InnerNode {
+    fn new(key: Range, node_state: NodeState) -> Self {
+        InnerNode {
+            key,
+            node_state,
+            left: None,
+            right: None,
+            height: 1,
+            max_key: key.max,
+        }
+    }
+    
+    /// Returns a readonly reference to the node associated with the `key` or None if not found.
+    fn search(&self, key: &Range) -> Option<&Self> {
+        match self.key.cmp(key) {
+            Ordering::Equal => Some(self),
+            Ordering::Less => self.right.as_ref().and_then(|node| node.search(key)),
+            Ordering::Greater => self.left.as_ref().and_then(|node| node.search(key)),
+        }
+    }
+
+    /// Returns a shared reference to the node covers full range of the `key`.
+    fn search_superset(&self, key: &Range) -> Option<&Self> {
+        if self.key.contain(key) {
+            Some(self)
+        } else if key.max < self.key.min && self.left.is_some() {
+            // Safe to unwrap() because we have just checked it.
+            self.left.as_ref().unwrap().search_superset(key)
+        } else if key.min > self.key.max && self.right.is_some() {
+            // Safe to unwrap() because we have just checked it.
+            self.right.as_ref().unwrap().search_superset(key)
+        } else {
+            None
+        }
+    }
+
+    /// Returns a mutable reference to the node covers full range of the `key`.
+    fn search_superset_mut(&mut self, key: &Range) -> Option<&mut Self> {
+        if self.key.contain(key) {
+            Some(self)
+        } else if key.max < self.key.min && self.left.is_some() {
+            // Safe to unwrap() because we have just checked it.
+            self.left.as_mut().unwrap().search_superset_mut(key)
+        } else if key.min > self.key.max && self.right.is_some() {
+            // Safe to unwrap() because we have just checked it.
+            self.right.as_mut().unwrap().search_superset_mut(key)
+        } else {
+            None
+        }
+    }
+
+    /// Insert a new (key, data) pair into the subtree.
+    fn insert(mut self, key: Range, node_state: NodeState) -> Result<Box<Self>> {
+        match self.key.cmp(&key) {
+            Ordering::Equal => {
+                return Err(Error::UnavailableRange(self.key.min, self.key.max));
+            }
+            Ordering::Less => {
+                if self.key.intersect(&key) {
+                    return Err(Error::Overlap(format!(
+                        "{:?} intersects with existing {:?}",
+                        key, self.key
+                    )));
+                }
+                match self.right {
+                    None => self.right = Some(Box::new(InnerNode::new(key, node_state))),
+                    Some(_) => {
+                        self.right = self
+                            .right
+                            .take()
+                            .map(|n| n.insert(key, node_state).unwrap())
+                    }
+                }
+            }
+            Ordering::Greater => {
+                if self.key.intersect(&key) {
+                    return Err(Error::Overlap(format!(
+                        "{:?} intersects with existing {:?}",
+                        key, self.key
+                    )));
+                }
+                match self.left {
+                    None => self.left = Some(Box::new(InnerNode::new(key, node_state))),
+                    Some(_) => {
+                        self.left = self.left.take().map(|n| n.insert(key, node_state).unwrap())
+                    }
+                }
+            }
+        }
+        Ok(self.updated_node())
+    }
+
+    /// Delete `key` from the subtree.
+    ///
+    /// Note: it doesn't return whether the key exists in the subtree, so caller need to ensure the
+    /// logic.
+    fn delete(mut self, key: &Range) -> Option<Box<Self>> {
+        match self.key.cmp(&key) {
+            Ordering::Equal => {
+                return self.delete_root();
+            }
+            Ordering::Less => {
+                if let Some(node) = self.right.take() {
+                    let right = node.delete(key);
+                    self.right = right;
+                    return Some(self.updated_node());
+                }
+            }
+            Ordering::Greater => {
+                if let Some(node) = self.left.take() {
+                    let left = node.delete(key);
+                    self.left = left;
+                    return Some(self.updated_node());
+                }
+            }
+        }
+        Some(Box::new(self))
+    }
+
+    /// Update an existing entry and return the old value.
+    pub(crate) fn update(&mut self, key: &Range, node_state: NodeState) -> Result<()> {
+        match self.key.cmp(&key) {
+            Ordering::Equal => {
+                match (self.node_state, node_state) {
+                    (NodeState::Free, NodeState::Free)
+                    | (NodeState::Allocated, NodeState::Free)
+                    | (NodeState::Allocated, NodeState::Allocated) => {
+                        return Err(Error::NeverAllocated(self.key.min));
+                    }
+                    _ => {}
+                }
+                self.node_state.replace(node_state);
+                Ok(())
+            }
+            Ordering::Less => match self.right.as_mut() {
+                None => Err(Error::NeverAllocated(key.min)),
+                Some(node) => node.update(key, node_state),
+            },
+            Ordering::Greater => match self.left.as_mut() {
+                None => Err(Error::NeverAllocated(key.min)),
+                Some(node) => node.update(key, node_state),
+            },
+        }
+    }
+
+    /// Rotate the node if necessary to keep balance.
+    fn rotate(self) -> Box<Self> {
+        let l = height(&self.left);
+        let r = height(&self.right);
+        match (l as i32) - (r as i32) {
+            1 | 0 | -1 => Box::new(self),
+            2 => self.rotate_left_successor(),
+            -2 => self.rotate_right_successor(),
+            _ => unreachable!(),
+        }
+    }
+
+    /// Perform a single left rotation on this node.
+    fn rotate_left(mut self) -> Box<Self> {
+        let mut new_root = self.right.take().expect("Node is broken");
+        self.right = new_root.left.take();
+        self.update_cached_info();
+        new_root.left = Some(Box::new(self));
+        new_root.update_cached_info();
+        new_root
+    }
+
+    /// Perform a single right rotation on this node.
+    fn rotate_right(mut self) -> Box<Self> {
+        let mut new_root = self.left.take().expect("Node is broken");
+        self.left = new_root.right.take();
+        self.update_cached_info();
+        new_root.right = Some(Box::new(self));
+        new_root.update_cached_info();
+        new_root
+    }
+
+    /// Performs a rotation when the left successor is too high.
+    fn rotate_left_successor(mut self) -> Box<Self> {
+        let left = self.left.take().expect("Node is broken");
+        if height(&left.left) < height(&left.right) {
+            let rotated = left.rotate_left();
+            self.left = Some(rotated);
+            self.update_cached_info();
+        } else {
+            self.left = Some(left);
+        }
+        self.rotate_right()
+    }
+
+    /// Performs a rotation when the right successor is too high.
+    fn rotate_right_successor(mut self) -> Box<Self> {
+        let right = self.right.take().expect("Node is broken");
+        if height(&right.left) > height(&right.right) {
+            let rotated = right.rotate_right();
+            self.right = Some(rotated);
+            self.update_cached_info();
+        } else {
+            self.right = Some(right);
+        }
+        self.rotate_left()
+    }
+
+    fn delete_root(mut self) -> Option<Box<Self>> {
+        match (self.left.take(), self.right.take()) {
+            (None, None) => None,
+            (Some(l), None) => Some(l),
+            (None, Some(r)) => Some(r),
+            (Some(l), Some(r)) => Some(Self::combine_subtrees(l, r)),
+        }
+    }
+
+    /// Find the minimal key below the tree and returns a new optional tree where the minimal
+    /// value has been removed and the (optional) minimal node as tuple (min_node, remaining)
+    fn get_new_root(mut self) -> (Self, Option<Box<Self>>) {
+        match self.left.take() {
+            None => {
+                let remaining = self.right.take();
+                (self, remaining)
+            }
+            Some(left) => {
+                let (min_node, left) = left.get_new_root();
+                self.left = left;
+                (min_node, Some(self.updated_node()))
+            }
+        }
+    }
+
+    fn combine_subtrees(l: Box<Self>, r: Box<Self>) -> Box<Self> {
+        let (mut new_root, remaining) = r.get_new_root();
+        new_root.left = Some(l);
+        new_root.right = remaining;
+        new_root.updated_node()
+    }
+
+    pub fn find_candidate(&self, constraint: &Constraint) -> Option<&Self> {
+        match constraint.policy {
+            AllocPolicy::FirstMatch => self.first_match(constraint),
+            AllocPolicy::LastMatch => self.last_match(constraint),
+        }
+    }
+
+    fn first_match(&self, constraint: &Constraint) -> Option<&Self> {
+        let mut candidate = if self.left.is_some() {
+            self.left.as_ref().unwrap().first_match(constraint)
+        } else {
+            None
+        };
+
+        if candidate.is_none() && self.check_constraint(constraint) {
+            candidate = Some(self);
+        }
+        if candidate.is_none() && self.right.is_some() {
+            candidate = self.right.as_ref().unwrap().first_match(constraint);
+        }
+        candidate
+    }
+
+    fn last_match(&self, constraint: &Constraint) -> Option<&Self> {
+        let mut candidate = if self.right.is_some() {
+            self.right.as_ref().unwrap().last_match(constraint)
+        } else {
+            None
+        };
+
+        if candidate.is_none() && self.check_constraint(constraint) {
+            candidate = Some(self);
+        }
+        if candidate.is_none() && self.left.is_some() {
+            candidate = self.left.as_ref().unwrap().last_match(constraint);
+        }
+        candidate
+    }
+
+    fn check_constraint(&self, constraint: &Constraint) -> bool {
+        if self.node_state.is_free() {
+            let min = std::cmp::max(self.key.min, constraint.min);
+            let max = std::cmp::min(self.key.max, constraint.max);
+            if min <= max {
+                let key = Range::new(min, max).expect("Invalid key");
+                if constraint.align == 0 || constraint.align == 1 {
+                    return key.len() >= constraint.size;
+                }
+                return match key.align_forward(constraint.align) {
+                    None => false,
+                    Some(aligned_key) => aligned_key.len() >= constraint.size,
+                };
+            }
+        }
+        false
+    }
+
+    /// Update cached information of the node.
+    /// Please make sure that the cached values of both children are up to date.
+    fn update_cached_info(&mut self) {
+        self.height = max(height(&self.left), height(&self.right)) + 1;
+        self.max_key = max(max_key(&self.left), max(max_key(&self.right), self.key.max));
+    }
+
+    /// Update the sub-tree to keep balance.
+    fn updated_node(mut self) -> Box<Self> {
+        self.update_cached_info();
+        self.rotate()
+    }
+}
+
+/// Compute height of the optional sub-tree.
+fn height(node: &Option<Box<InnerNode>>) -> u64 {
+    node.as_ref().map_or(0, |n| n.height)
+}
+
+/// Compute maximum key value covered by the optional sub-tree.
+fn max_key(node: &Option<Box<InnerNode>>) -> u64 {
+    node.as_ref().map_or(0, |n| n.max_key)
+}
+
+/// An interval tree implementation specialized for VMM resource management.
+#[derive(Debug, Default, PartialEq)]
+pub struct IntervalTree {
+    pub(crate) root: Option<Box<InnerNode>>,
+}
+
+impl IntervalTree {
+    /// Construct a new empty IntervalTree.
+    ///
+    /// # Examples
+    /// ```rust
+    /// extern crate vm_allocator;
+    ///
+    /// let tree = vm_allocator::IntervalTree::<u64>::new();
+    /// ```
+    pub fn new() -> Self {
+        IntervalTree { root: None }
+    }
+
+    /// Check whether the interval tree is empty.
+    pub fn is_empty(&self) -> bool {
+        self.root.is_none()
+    }
+
+    /// Get the data item associated with the key, or return None if no match found.
+    ///
+    /// # Examples
+    /// ```rust
+    /// extern crate vm_allocator;
+    /// use vm_allocator::{IntervalTree, Range, NodeState};
+    ///
+    /// let mut tree = vm_allocator::IntervalTree::<u64>::new();
+    /// assert!(tree.is_empty());
+    /// assert_eq!(tree.get(&Range::new(0x101u64, 0x101u64)), None);
+    /// tree.insert(Range::new(0x100u64, 0x100u64), Some(1));
+    /// tree.insert(Range::new(0x200u64, 0x2ffu64), None);
+    /// assert!(!tree.is_empty());
+    /// assert_eq!(tree.get(&Range::new(0x100u64, 0x100u64)), Some(NodeState::Valued(&1)));
+    /// assert_eq!(tree.get(&Range::new(0x200u64, 0x2ffu64)), Some(NodeState::Free));
+    /// assert_eq!(tree.get(&Range::new(0x101u64, 0x101u64)), None);
+    /// assert_eq!(tree.get(&Range::new(0x100u64, 0x101u64)), None);
+    /// ```
+    pub fn get(&self, key: &Range) -> Option<NodeState> {
+        match self.root {
+            None => None,
+            Some(ref node) => node.search(key).map(|n| n.node_state),
+        }
+    }
+
+    /// Get a shared reference to the node fully covering the entire key range.
+    ///
+    /// # Examples
+    /// ```rust
+    /// extern crate vm_allocator;
+    /// use vm_allocator::{IntervalTree, Range, NodeState};
+    ///
+    /// let mut tree = IntervalTree::<u64>::new();
+    /// tree.insert(Range::new(0x100u64, 0x100u64), Some(1));
+    /// tree.insert(Range::new(0x200u64, 0x2ffu64), None);
+    /// assert_eq!(tree.get_superset(&Range::new(0x100u64, 0x100u64)),
+    ///            Some((&Range::new(0x100u64, 0x100u64), NodeState::Valued(&1))));
+    /// assert_eq!(tree.get_superset(&Range::new(0x210u64, 0x210u64)),
+    ///            Some((&Range::new(0x200u64, 0x2ffu64), NodeState::Free)));
+    /// assert_eq!(tree.get_superset(&Range::new(0x2ffu64, 0x2ffu64)),
+    ///            Some((&Range::new(0x200u64, 0x2ffu64), NodeState::Free)));
+    /// ```
+    pub fn get_superset(&self, key: &Range) -> Option<(&Range, NodeState)> {
+        match self.root {
+            None => None,
+            Some(ref node) => node.search_superset(key).map(|n| (&n.key, n.node_state)),
+        }
+    }
+
+    /// Insert the (key, data) pair into the interval tree, returns Error if intersects with existing nodes.
+    ///
+    /// # Examples
+    /// ```rust
+    /// extern crate vm_allocator;
+    /// use vm_allocator::{IntervalTree, Range, NodeState};
+    ///
+    /// let mut tree = IntervalTree::<u64>::new();
+    /// tree.insert(Range::new(0x100u64, 0x100u64), Some(1));
+    /// tree.insert(Range::new(0x200u64, 0x2ffu64), None);
+    /// assert_eq!(tree.get(&Range::new(0x100u64, 0x100u64)), Some(NodeState::Valued(&1)));
+    /// assert_eq!(tree.get(&Range::new(0x200u64, 0x2ffu64)), Some(NodeState::Free));
+    /// ```
+    pub fn insert(&mut self, key: Range, node_state: NodeState) -> Result<()> {
+        match self.root.take() {
+            None => {
+                self.root = Some(Box::new(InnerNode::new(key, node_state)));
+                Ok(())
+            }
+            Some(node) => {
+                self.root = Some(node.insert(key, node_state)?);
+                Ok(())
+            }
+        }
+    }
+
+    /// Remove the `key` from the tree and return the associated data.
+    ///
+    /// # Examples
+    /// ```rust
+    /// extern crate vm_allocator;
+    /// use vm_allocator::{IntervalTree, Range};
+    ///
+    /// let mut tree = IntervalTree::<u64>::new();
+    /// tree.insert(Range::new(0x100u64, 0x100u64), Some(1));
+    /// tree.insert(Range::new(0x200u64, 0x2ffu64), None);
+    /// let old = tree.delete(&Range::new(0x100u64, 0x100u64));
+    /// assert_eq!(old, Some(1));
+    /// let old = tree.delete(&Range::new(0x200u64, 0x2ffu64));
+    /// assert_eq!(old, None);
+    /// ```
+    pub fn delete(&mut self, key: &Range) -> Option<()> {
+        match self.root.take() {
+            Some(node) => {
+                let root = node.delete(key);
+                self.root = root;
+                Some(())
+            }
+            None => None,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_new_range() {
+        let _ = Range::new(2u64, 1u64);
+    }
+
+    #[test]
+    fn test_new_range_overflow() {
+        let _ = Range::new(0u64, std::u64::MAX);
+    }
+
+    #[test]
+    fn test_range_intersect() {
+        let a = Range::new(1u64, 4u64).unwrap();
+        let b = Range::new(4u64, 6u64).unwrap();
+        let c = Range::new(2u64, 3u64).unwrap();
+        let d = Range::new(4u64, 4u64).unwrap();
+        let e = Range::new(5u64, 6u64).unwrap();
+
+        assert!(a.intersect(&b));
+        assert!(b.intersect(&a));
+        assert!(a.intersect(&c));
+        assert!(c.intersect(&a));
+        assert!(a.intersect(&d));
+        assert!(d.intersect(&a));
+        assert!(!a.intersect(&e));
+        assert!(!e.intersect(&a));
+
+        assert_eq!(a.len(), 4);
+        assert_eq!(d.len(), 1);
+    }
+
+    #[test]
+    fn test_range_contain() {
+        let a = Range::new(2u64, 6u64).unwrap();
+        assert!(a.contain(&Range::new(2u64, 3u64).unwrap()));
+        assert!(a.contain(&Range::new(3u64, 4u64).unwrap()));
+        assert!(a.contain(&Range::new(5u64, 5u64).unwrap()));
+        assert!(a.contain(&Range::new(5u64, 6u64).unwrap()));
+        assert!(a.contain(&Range::new(6u64, 6u64).unwrap()));
+        assert!(!a.contain(&Range::new(1u64, 1u64).unwrap()));
+        assert!(!a.contain(&Range::new(1u64, 2u64).unwrap()));
+        assert!(!a.contain(&Range::new(1u64, 3u64).unwrap()));
+        assert!(!a.contain(&Range::new(1u64, 7u64).unwrap()));
+        assert!(!a.contain(&Range::new(7u64, 8u64).unwrap()));
+        assert!(!a.contain(&Range::new(6u64, 7u64).unwrap()));
+        assert!(!a.contain(&Range::new(7u64, 8u64).unwrap()));
+    }
+
+    #[test]
+    fn test_range_align_forward() {
+        let a = Range::new(2u64, 6u64).unwrap();
+        assert_eq!(a.align_forward(0), Some(Range::new(2u64, 6u64).unwrap()));
+        assert_eq!(a.align_forward(1), Some(Range::new(2u64, 6u64).unwrap()));
+        assert_eq!(a.align_forward(2), Some(Range::new(2u64, 6u64).unwrap()));
+        assert_eq!(a.align_forward(4), Some(Range::new(4u64, 6u64).unwrap()));
+        assert_eq!(a.align_forward(8), None);
+        assert_eq!(a.align_forward(3), None);
+
+        let a = Range::new(0xFFFF_FFFF_FFFF_FFFDu64, 0xFFFF_FFFF_FFFF_FFFFu64).unwrap();
+        assert_eq!(
+            a.align_forward(2),
+            Some(Range::new(0xFFFF_FFFF_FFFF_FFFEu64, 0xFFFF_FFFF_FFFF_FFFF).unwrap())
+        );
+        assert_eq!(a.align_forward(4), None);
+    }
+
+    #[test]
+    fn test_range_ord() {
+        let a = Range::new(1u64, 4u64).unwrap();
+        let b = Range::new(1u64, 4u64).unwrap();
+        let c = Range::new(1u64, 3u64).unwrap();
+        let d = Range::new(1u64, 5u64).unwrap();
+        let e = Range::new(2u64, 2u64).unwrap();
+
+        assert_eq!(a, b);
+        assert_eq!(b, a);
+        assert!(a > c);
+        assert!(c < a);
+        assert!(a < d);
+        assert!(d > a);
+        assert!(a < e);
+        assert!(e > a);
+    }
+
+    #[test]
+    fn test_tree_insert_equal() {
+        let mut tree = IntervalTree::new();
+        let _ = tree.insert(Range::new(0x100u64, 0x200).unwrap(), NodeState::Allocated);
+        let _ = tree.insert(Range::new(0x100u64, 0x200).unwrap(), NodeState::Free);
+    }
+
+    #[test]
+    fn test_tree_insert_intersect() {
+        let mut tree = IntervalTree::new();
+        let _ = tree.insert(
+            Range::new(0x100u64, 0x200u64).unwrap(),
+            NodeState::Allocated,
+        );
+        let _ = tree.insert(Range::new(0x200u64, 0x2ffu64).unwrap(), NodeState::Free);
+    }
+
+    #[test]
+    fn test_tree_get_superset() {
+        let mut tree = IntervalTree::new();
+        let _ = tree.insert(
+            Range::new(0x100u64, 0x100u64).unwrap(),
+            NodeState::Allocated,
+        );
+        let _ = tree.insert(Range::new(0x200u64, 0x2ffu64).unwrap(), NodeState::Free);
+        assert_eq!(
+            tree.get_superset(&Range::new(0x100u64, 0x100).unwrap()),
+            Some((&Range::new(0x100, 0x100u64).unwrap(), NodeState::Allocated))
+        );
+        assert_eq!(
+            tree.get_superset(&Range::new(0x200u64, 0x200).unwrap()),
+            Some((&Range::new(0x200, 0x2ffu64).unwrap(), NodeState::Free))
+        );
+        assert_eq!(
+            tree.get_superset(&Range::new(0x200u64, 0x2ff).unwrap()),
+            Some((&Range::new(0x200, 0x2ffu64).unwrap(), NodeState::Free))
+        );
+        assert_eq!(
+            tree.get_superset(&Range::new(0x210u64, 0x210).unwrap()),
+            Some((&Range::new(0x200, 0x2ffu64).unwrap(), NodeState::Free))
+        );
+        assert_eq!(
+            tree.get_superset(&Range::new(0x2ffu64, 0x2ff).unwrap()),
+            Some((&Range::new(0x200, 0x2ffu64).unwrap(), NodeState::Free))
+        );
+        assert_eq!(
+            tree.get_superset(&Range::new(0x2ffu64, 0x300).unwrap()),
+            None
+        );
+        assert_eq!(
+            tree.get_superset(&Range::new(0x300u64, 0x300).unwrap()),
+            None
+        );
+        assert_eq!(
+            tree.get_superset(&Range::new(0x1ffu64, 0x300).unwrap()),
+            None
+        );
+    }
+
+    #[test]
+    fn test_tree_delete() {
+        let mut tree = IntervalTree::new();
+        assert_eq!(tree.get(&Range::new(0x101u64, 0x101u64).unwrap()), None);
+        assert!(tree.is_empty());
+        let _ = tree.insert(
+            Range::new(0x100u64, 0x100u64).unwrap(),
+            NodeState::Allocated,
+        );
+        let _ = tree.insert(Range::new(0x200u64, 0x2ffu64).unwrap(), NodeState::Free);
+        assert!(!tree.is_empty());
+        assert_eq!(
+            tree.get(&Range::new(0x100u64, 0x100u64).unwrap()),
+            Some(NodeState::Allocated)
+        );
+        assert_eq!(
+            tree.get(&Range::new(0x200u64, 0x2ffu64).unwrap()),
+            Some(NodeState::Free)
+        );
+        assert_eq!(tree.get(&Range::new(0x101u64, 0x101u64).unwrap()), None);
+
+        let _old = tree.delete(&Range::new(0x100u64, 0x100u64).unwrap());
+        let _old = tree.delete(&Range::new(0x200u64, 0x2ffu64).unwrap());
+
+        assert!(tree.is_empty());
+        assert_eq!(tree.get(&Range::new(0x100u64, 0x100u64).unwrap()), None);
+        assert_eq!(tree.get(&Range::new(0x200u64, 0x2ffu64).unwrap()), None);
+    }
+}
