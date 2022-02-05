@@ -24,13 +24,13 @@ pub enum Error {
     /// There are no more IDs available in the manage range
     ResourceExhausted,
     /// The range to manage is invalid.
-    InvalidRange(u32, u32),
+    InvalidRange(u64, u64),
 }
 
 impl std::error::Error for Error {}
 
 /// Wrapper over std::result::Result
-pub type Result = result::Result<u32, Error>;
+pub type Result<T> = result::Result<T, Error>;
 
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
