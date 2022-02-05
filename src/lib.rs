@@ -4,6 +4,7 @@
 
 #![deny(missing_docs)]
 
+mod allocation_engine;
 mod id_allocator;
 
 pub use crate::id_allocator::IdAllocator;
@@ -25,6 +26,10 @@ pub enum Error {
     ResourceExhausted,
     /// The range to manage is invalid.
     InvalidRange(u64, u64),
+    /// Address is unaligned
+    UnalignedAddress,
+    /// Alignment value is invalid
+    InvalidAlignment,
 }
 
 impl std::error::Error for Error {}
@@ -51,6 +56,8 @@ impl fmt::Display for Error {
             InvalidRange(begin, end) => {
                 write!(f, "The range specified: {}-{} is not valid.", begin, end)
             }
+            UnalignedAddress => write!(f, "Address is unaligned."),
+            InvalidAlignment => write!(f, "Alignment value is invalid."),
         }
     }
 }
