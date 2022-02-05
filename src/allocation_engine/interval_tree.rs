@@ -133,6 +133,20 @@ pub enum NodeState {
     Allocated,
 }
 
+impl NodeState {
+    fn take(&mut self) -> Self {
+        std::mem::replace(self, NodeState::Free)
+    }
+
+    fn replace(&mut self, value: NodeState) -> Self {
+        std::mem::replace(self, value)
+    }
+
+    pub(crate) fn is_free(&self) -> bool {
+        *self == NodeState::Free
+    }
+}
+
 /// Internal tree node to implement interval tree.
 #[derive(Debug, PartialEq)]
 pub(crate) struct InnerNode {
