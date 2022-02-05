@@ -54,33 +54,3 @@ impl fmt::Display for Error {
         }
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use crate::Error as AllocError;
-
-    #[test]
-    fn test_error_messages() {
-        let err = AllocError::Overflow;
-        assert_eq!(format!("{}", err), "Id counter overflowed.");
-        let err = AllocError::OutOfRange(3);
-        assert_eq!(format!("{}", err), "Specified id: 3 is not in the range.");
-        let err = AllocError::AlreadyReleased(3);
-        assert_eq!(format!("{}", err), "Specified id: 3 is already released.");
-        let err = AllocError::NeverAllocated(3);
-        assert_eq!(
-            format!("{}", err),
-            "Specified id: 3 was never allocated, can't release it"
-        );
-        let err = AllocError::ResourceExhausted;
-        assert_eq!(
-            format!("{}", err),
-            "There are no more available ids in the specified range."
-        );
-        let err = AllocError::InvalidRange(23, 5);
-        assert_eq!(
-            format!("{}", err),
-            "The range specified: 23-5 is not valid."
-        );
-    }
-}
