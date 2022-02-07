@@ -164,6 +164,18 @@ pub(crate) struct InnerNode {
     pub(crate) max_key: u64,
 }
 
+impl InnerNode {
+    fn new(key: Range, node_state: NodeState) -> Self {
+        InnerNode {
+            key,
+            node_state,
+            left: None,
+            right: None,
+            height: 1,
+            max_key: key.max,
+        }
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::*;
