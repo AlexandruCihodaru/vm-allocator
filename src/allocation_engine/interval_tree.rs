@@ -304,6 +304,29 @@ impl InnerNode {
         new_root.right = remaining;
         new_root.updated_node()
     }
+
+    /// Update cached information of the node.
+    /// Please make sure that the cached values of both children are up to date.
+    fn update_cached_info(&mut self) {
+        self.height = max(height(&self.left), height(&self.right)) + 1;
+        self.max_key = max(max_key(&self.left), max(max_key(&self.right), self.key.max));
+    }
+
+    /// Update the sub-tree to keep balance.
+    fn updated_node(mut self) -> Box<Self> {
+        self.update_cached_info();
+        self.rotate()
+    }
+}
+
+/// Compute height of the optional sub-tree.
+fn height(node: &Option<Box<InnerNode>>) -> u64 {
+    node.as_ref().map_or(0, |n| n.height)
+}
+
+/// Compute maximum key value covered by the optional sub-tree.
+fn max_key(node: &Option<Box<InnerNode>>) -> u64 {
+    node.as_ref().map_or(0, |n| n.max_key)
 }
 
 #[cfg(test)]
