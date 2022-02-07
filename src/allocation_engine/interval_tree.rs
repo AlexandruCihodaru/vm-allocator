@@ -214,6 +214,96 @@ impl InnerNode {
             None
         }
     }
+
+    /// Rotate the node if necessary to keep balance.
+    fn rotate(self) -> Box<Self> {
+        let l = height(&self.left);
+        let r = height(&self.right);
+        match (l as i32) - (r as i32) {
+            1 | 0 | -1 => Box::new(self),
+            2 => self.rotate_left_successor(),
+            -2 => self.rotate_right_successor(),
+            _ => unreachable!(),
+        }
+    }
+
+    /// Perform a single left rotation on this node.
+    fn rotate_left(mut self) -> Box<Self> {
+        let mut new_root = self.right.take().expect("Node is broken");
+        self.right = new_root.left.take();
+        self.update_cached_info();
+        new_root.left = Some(Box::new(self));
+        new_root.update_cached_info();
+        new_root
+    }
+
+    /// Perform a single right rotation on this node.
+    fn rotate_right(mut self) -> Box<Self> {
+        let mut new_root = self.left.take().expect("Node is broken");
+        self.left = new_root.right.take();
+        self.update_cached_info();
+        new_root.right = Some(Box::new(self));
+        new_root.update_cached_info();
+        new_root
+    }
+
+    /// Performs a rotation when the left successor is too high.
+    fn rotate_left_successor(mut self) -> Box<Self> {
+        let left = self.left.take().expect("Node is broken");
+        if height(&left.left) < height(&left.right) {
+            let rotated = left.rotate_left();
+            self.left = Some(rotated);
+            self.update_cached_info();
+        } else {
+            self.left = Some(left);
+        }
+        self.rotate_right()
+    }
+
+    /// Performs a rotation when the right successor is too high.
+    fn rotate_right_successor(mut self) -> Box<Self> {
+        let right = self.right.take().expect("Node is broken");
+        if height(&right.left) > height(&right.right) {
+            let rotated = right.rotate_right();
+            self.right = Some(rotated);
+            self.update_cached_info();
+        } else {
+            self.right = Some(right);
+        }
+        self.rotate_left()
+    }
+
+    fn delete_root(mut self) -> Option<Box<Self>> {
+        match (self.left.take(), self.right.take()) {
+            (None, None) => None,
+            (Some(l), None) => Some(l),
+            (None, Some(r)) => Some(r),
+            (Some(l), Some(r)) => Some(Self::combine_subtrees(l, r)),
+        }
+    }
+
+    /// Find the minimal key below the tree and returns a new optional tree where the minimal
+    /// value has been removed and the (optional) minimal node as tuple (min_node, remaining)
+    fn get_new_root(mut self) -> (Self, Option<Box<Self>>) {
+        match self.left.take() {
+            None => {
+                let remaining = self.right.take();
+                (self, remaining)
+            }
+            Some(left) => {
+                let (min_node, left) = left.get_new_root();
+                self.left = left;
+                (min_node, Some(self.updated_node()))
+            }
+        }
+    }
+
+    fn combine_subtrees(l: Box<Self>, r: Box<Self>) -> Box<Self> {
+        let (mut new_root, remaining) = r.get_new_root();
+        new_root.left = Some(l);
+        new_root.right = remaining;
+        new_root.updated_node()
+    }
 }
 
 #[cfg(test)]
