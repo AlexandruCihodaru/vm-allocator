@@ -72,6 +72,28 @@ pub struct Range {
     pub max: u64,
 }
 
+impl Range {
+    /// Create a new Range object.
+    pub fn new(min: u64, max: u64) -> Result<Self> { }
+
+    /// Get length of the range.
+    pub fn len(&self) -> u64 { }
+
+    /// Check whether two Range objects intersect with each other.
+    pub fn intersect(&self, other: &Range) -> bool { }
+
+    /// Check whether the key is fully covered.
+    pub fn contain(&self, other: &Range) -> bool { }
+
+    /// Create a new Range object with min being the first value from the range
+    /// that is aligned to `align`.
+    pub fn align_forward(&self, align: u64) -> Result<Range> { }
+
+    /// Create a new Range object with min being the last value from the range
+    /// that is aligned to `align`.
+    pub fn align_back(&self, align: u64, size: u64) -> Result<Range> { }
+}
+
 /// Node state for interval tree nodes.
 ///
 /// Valid state transition:
