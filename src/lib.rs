@@ -21,7 +21,9 @@ pub enum Error {
     /// An id that was already released was requested to be released.
     AlreadyReleased(u32),
     /// An id  that was never allocated was requested to be released.
-    NeverAllocated(u32),
+    IdNeverAllocated(u32),
+    /// smth smth
+    AddressSlotNeverAllocated(allocation_engine::Range),
     /// There are no more IDs available in the manage range
     ResourceExhausted,
     /// The range to manage is invalid.
@@ -30,6 +32,8 @@ pub enum Error {
     UnalignedAddress,
     /// Alignment value is invalid
     InvalidAlignment,
+    /// smth smth
+    Overlap(allocation_engine::Range, allocation_engine::Range),
 }
 
 impl std::error::Error for Error {}
@@ -48,7 +52,7 @@ impl fmt::Display for Error {
                 write!(f, "There are no more available ids in the specified range.")
             }
             AlreadyReleased(id) => write!(f, "Specified id: {} is already released.", id),
-            NeverAllocated(id) => write!(
+            IdNeverAllocated(id) => write!(
                 f,
                 "Specified id: {} was never allocated, can't release it",
                 id
@@ -58,6 +62,14 @@ impl fmt::Display for Error {
             }
             UnalignedAddress => write!(f, "Address is unaligned."),
             InvalidAlignment => write!(f, "Alignment value is invalid."),
+            Overlap(candidate, allocated_range) => write!(
+                f,
+                "Addresses are overlaping.{} intersects with existing {}",
+                candidate, allocated_range
+            ),
+            AddressSlotNeverAllocated(range) => {
+                write!(f, "Specufued range: {} was never allocated.", range)
+            }
         }
     }
 }

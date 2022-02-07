@@ -84,7 +84,7 @@ impl IdAllocator {
         }
         if let Some(next_id) = self.next_id {
             if next_id < id {
-                return Err(Error::NeverAllocated(id));
+                return Err(Error::IdNeverAllocated(id));
             }
         }
 
@@ -165,7 +165,7 @@ mod tests {
         assert_eq!(legacy_irq_allocator.freed_ids.len(), 1);
         assert_eq!(
             legacy_irq_allocator.free_id(21).unwrap_err(),
-            Error::NeverAllocated(21)
+            Error::IdNeverAllocated(21)
         );
     }
 

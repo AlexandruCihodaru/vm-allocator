@@ -54,6 +54,12 @@ impl std::fmt::Debug for Range {
     }
 }
 
+impl std::fmt::Display for Range {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "[ {:016x}, {:016x} ]", self.min, self.max)
+    }
+}
+
 impl Range {
     /// Create a new Range object.
     pub fn new(min: u64, max: u64) -> Result<Self> {
