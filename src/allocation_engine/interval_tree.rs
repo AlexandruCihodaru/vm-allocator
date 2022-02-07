@@ -423,6 +423,66 @@ fn max_key(node: &Option<Box<InnerNode>>) -> u64 {
     node.as_ref().map_or(0, |n| n.max_key)
 }
 
+/// An interval tree implementation specialized for VMM resource management.
+#[derive(Debug, Default, PartialEq)]
+pub struct IntervalTree {
+    root: Option<Box<InnerNode>>,
+}
+
+impl IntervalTree {
+    /// Construct a new empty IntervalTree.
+    pub fn new() -> Self {
+        IntervalTree { root: None }
+    }
+
+    /// Check whether the interval tree is empty.
+    pub fn is_empty(&self) -> bool {
+        self.root.is_none()
+    }
+
+    /// Get the data item associated with the key, or return None if no match found.
+    pub fn get(&self, key: &Range) -> Option<NodeState> {
+        match self.root {
+            None => None,
+            Some(ref node) => node.search(key).map(|n| n.node_state),
+        }
+    }
+
+    /// Get a shared reference to the node fully covering the entire key range.
+    pub fn get_superset(&self, key: &Range) -> Option<(&Range, NodeState)> {
+        match self.root {
+            None => None,
+            Some(ref node) => node.search_superset(key).map(|n| (&n.key, n.node_state)),
+        }
+    }
+
+    /// Insert the (key, data) pair into the interval tree, returns Error if intersects with existing nodes.
+    pub fn insert(&mut self, key: Range, node_state: NodeState) -> Result<()> {
+        match self.root.take() {
+            None => {
+                self.root = Some(Box::new(InnerNode::new(key, node_state)));
+                Ok(())
+            }
+            Some(node) => {
+                self.root = Some(node.insert(key, node_state)?);
+                Ok(())
+            }
+        }
+    }
+
+    /// Remove the `key` from the tree and return the associated data.
+    pub fn delete(&mut self, key: &Range) -> Option<()> {
+        match self.root.take() {
+            Some(node) => {
+                let root = node.delete(key);
+                self.root = root;
+                Some(())
+            }
+            None => None,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -514,5 +574,93 @@ mod tests {
         assert!(d > a);
         assert!(a < e);
         assert!(e > a);
+    }
+
+    #[test]
+    fn test_tree_insert_equal() {
+        let mut tree = IntervalTree::new();
+        let _ = tree.insert(Range::new(0x100u64, 0x200).unwrap(), NodeState::Allocated);
+        let _ = tree.insert(Range::new(0x100u64, 0x200).unwrap(), NodeState::Free);
+    }
+
+    #[test]
+    fn test_tree_insert_intersect() {
+        let mut tree = IntervalTree::new();
+        let _ = tree.insert(
+            Range::new(0x100u64, 0x200u64).unwrap(),
+            NodeState::Allocated,
+        );
+        let _ = tree.insert(Range::new(0x200u64, 0x2ffu64).unwrap(), NodeState::Free);
+    }
+
+    #[test]
+    fn test_tree_get_superset() {
+        let mut tree = IntervalTree::new();
+        let _ = tree.insert(
+            Range::new(0x100u64, 0x100u64).unwrap(),
+            NodeState::Allocated,
+        );
+        let _ = tree.insert(Range::new(0x200u64, 0x2ffu64).unwrap(), NodeState::Free);
+        assert_eq!(
+            tree.get_superset(&Range::new(0x100u64, 0x100).unwrap()),
+            Some((&Range::new(0x100, 0x100u64).unwrap(), NodeState::Allocated))
+        );
+        assert_eq!(
+            tree.get_superset(&Range::new(0x200u64, 0x200).unwrap()),
+            Some((&Range::new(0x200, 0x2ffu64).unwrap(), NodeState::Free))
+        );
+        assert_eq!(
+            tree.get_superset(&Range::new(0x200u64, 0x2ff).unwrap()),
+            Some((&Range::new(0x200, 0x2ffu64).unwrap(), NodeState::Free))
+        );
+        assert_eq!(
+            tree.get_superset(&Range::new(0x210u64, 0x210).unwrap()),
+            Some((&Range::new(0x200, 0x2ffu64).unwrap(), NodeState::Free))
+        );
+        assert_eq!(
+            tree.get_superset(&Range::new(0x2ffu64, 0x2ff).unwrap()),
+            Some((&Range::new(0x200, 0x2ffu64).unwrap(), NodeState::Free))
+        );
+        assert_eq!(
+            tree.get_superset(&Range::new(0x2ffu64, 0x300).unwrap()),
+            None
+        );
+        assert_eq!(
+            tree.get_superset(&Range::new(0x300u64, 0x300).unwrap()),
+            None
+        );
+        assert_eq!(
+            tree.get_superset(&Range::new(0x1ffu64, 0x300).unwrap()),
+            None
+        );
+    }
+
+    #[test]
+    fn test_tree_delete() {
+        let mut tree = IntervalTree::new();
+        assert_eq!(tree.get(&Range::new(0x101u64, 0x101u64).unwrap()), None);
+        assert!(tree.is_empty());
+        let _ = tree.insert(
+            Range::new(0x100u64, 0x100u64).unwrap(),
+            NodeState::Allocated,
+        );
+        let _ = tree.insert(Range::new(0x200u64, 0x2ffu64).unwrap(), NodeState::Free);
+        assert!(!tree.is_empty());
+        assert_eq!(
+            tree.get(&Range::new(0x100u64, 0x100u64).unwrap()),
+            Some(NodeState::Allocated)
+        );
+        assert_eq!(
+            tree.get(&Range::new(0x200u64, 0x2ffu64).unwrap()),
+            Some(NodeState::Free)
+        );
+        assert_eq!(tree.get(&Range::new(0x101u64, 0x101u64).unwrap()), None);
+
+        let _old = tree.delete(&Range::new(0x100u64, 0x100u64).unwrap());
+        let _old = tree.delete(&Range::new(0x200u64, 0x2ffu64).unwrap());
+
+        assert!(tree.is_empty());
+        assert_eq!(tree.get(&Range::new(0x100u64, 0x100u64).unwrap()), None);
+        assert_eq!(tree.get(&Range::new(0x200u64, 0x2ffu64).unwrap()), None);
     }
 }
