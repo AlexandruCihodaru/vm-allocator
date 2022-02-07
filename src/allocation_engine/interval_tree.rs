@@ -359,6 +359,33 @@ impl InnerNode {
         Ok(self.updated_node())
     }
 
+    /// Delete `key` from the subtree.
+    ///
+    /// Note: it doesn't return whether the key exists in the subtree, so caller need to ensure the
+    /// logic.
+    fn delete(mut self, key: &Range) -> Option<Box<Self>> {
+        match self.key.cmp(&key) {
+            Ordering::Equal => {
+                return self.delete_root();
+            }
+            Ordering::Less => {
+                if let Some(node) = self.right.take() {
+                    let right = node.delete(key);
+                    self.right = right;
+                    return Some(self.updated_node());
+                }
+            }
+            Ordering::Greater => {
+                if let Some(node) = self.left.take() {
+                    let left = node.delete(key);
+                    self.left = left;
+                    return Some(self.updated_node());
+                }
+            }
+        }
+        Some(Box::new(self))
+    }
+
 }
 
 /// Compute height of the optional sub-tree.
