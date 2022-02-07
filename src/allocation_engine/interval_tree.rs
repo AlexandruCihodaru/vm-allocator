@@ -323,6 +323,42 @@ impl InnerNode {
         self.update_cached_info();
         self.rotate()
     }
+
+    /// Insert a new (key, data) pair into the subtree.
+    fn insert(mut self, key: Range, node_state: NodeState) -> Result<Box<Self>> {
+        match self.key.cmp(&key) {
+            Ordering::Equal => {
+                return Err(Error::ResourceExhausted);
+            }
+            Ordering::Less => {
+                if self.key.intersect(&key) {
+                    return Err(Error::Overlap(key, self.key));
+                }
+                match self.right {
+                    None => self.right = Some(Box::new(InnerNode::new(key, node_state))),
+                    Some(_) => {
+                        self.right = self
+                            .right
+                            .take()
+                            .map(|n| n.insert(key, node_state).unwrap())
+                    }
+                }
+            }
+            Ordering::Greater => {
+                if self.key.intersect(&key) {
+                    return Err(Error::Overlap(key, self.key));
+                }
+                match self.left {
+                    None => self.left = Some(Box::new(InnerNode::new(key, node_state))),
+                    Some(_) => {
+                        self.left = self.left.take().map(|n| n.insert(key, node_state).unwrap())
+                    }
+                }
+            }
+        }
+        Ok(self.updated_node())
+    }
+
 }
 
 /// Compute height of the optional sub-tree.
