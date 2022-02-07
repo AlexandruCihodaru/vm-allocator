@@ -175,7 +175,47 @@ impl InnerNode {
             max_key: key.max,
         }
     }
+
+    /// Returns a readonly reference to the node associated with the `key` or None if not found.
+    fn search(&self, key: &Range) -> Option<&Self> {
+        match self.key.cmp(key) {
+            Ordering::Equal => Some(self),
+            Ordering::Less => self.right.as_ref().and_then(|node| node.search(key)),
+            Ordering::Greater => self.left.as_ref().and_then(|node| node.search(key)),
+        }
+    }
+
+    /// Returns a shared reference to the node covers full range of the `key`.
+    fn search_superset(&self, key: &Range) -> Option<&Self> {
+        if self.key.contain(key) {
+            Some(self)
+        } else if key.max < self.key.min && self.left.is_some() {
+            // Safe to unwrap() because we have just checked it.
+            self.left.as_ref().unwrap().search_superset(key)
+        } else if key.min > self.key.max && self.right.is_some() {
+            // Safe to unwrap() because we have just checked it.
+            self.right.as_ref().unwrap().search_superset(key)
+        } else {
+            None
+        }
+    }
+
+    /// Returns a mutable reference to the node covers full range of the `key`.
+    fn search_superset_mut(&mut self, key: &Range) -> Option<&mut Self> {
+        if self.key.contain(key) {
+            Some(self)
+        } else if key.max < self.key.min && self.left.is_some() {
+            // Safe to unwrap() because we have just checked it.
+            self.left.as_mut().unwrap().search_superset_mut(key)
+        } else if key.min > self.key.max && self.right.is_some() {
+            // Safe to unwrap() because we have just checked it.
+            self.right.as_mut().unwrap().search_superset_mut(key)
+        } else {
+            None
+        }
+    }
 }
+
 #[cfg(test)]
 mod tests {
     use super::*;
