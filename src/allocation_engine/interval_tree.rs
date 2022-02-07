@@ -386,6 +386,31 @@ impl InnerNode {
         Some(Box::new(self))
     }
 
+    /// Update an existing entry and return the old value.
+    fn update(&mut self, key: &Range, node_state: NodeState) -> Result<()> {
+        match self.key.cmp(&key) {
+            Ordering::Equal => {
+                match (self.node_state, node_state) {
+                    (NodeState::Free, NodeState::Free)
+                    | (NodeState::Allocated, NodeState::Free)
+                    | (NodeState::Allocated, NodeState::Allocated) => {
+                        return Err(Error::AddressSlotNeverAllocated(self.key));
+                    }
+                    _ => {}
+                }
+                self.node_state.replace(node_state);
+                Ok(())
+            }
+            Ordering::Less => match self.right.as_mut() {
+                None => Err(Error::AddressSlotNeverAllocated(*key)),
+                Some(node) => node.update(key, node_state),
+            },
+            Ordering::Greater => match self.left.as_mut() {
+                None => Err(Error::AddressSlotNeverAllocated(*key)),
+                Some(node) => node.update(key, node_state),
+            },
+        }
+    }
 }
 
 /// Compute height of the optional sub-tree.
