@@ -406,7 +406,7 @@ impl IntervalTree {
                 return Err(Error::Overlap(key, current_node_unwrapped.key));
             }
             match current_node_unwrapped.key.cmp(&key) {
-                Ordering::Equal => return Err(Error::ResourceExhausted),
+                Ordering::Equal => return Err(Error::ResourceNotAvailable),
                 Ordering::Less => {
                     current_node = &mut current_node_unwrapped.right;
                 }
@@ -424,6 +424,35 @@ impl IntervalTree {
         }
         self.root_node = Some(self.root_node.take().unwrap().rotate());
         Ok(())
+    }
+
+    /// Update the state of an old node.
+    #[allow(dead_code)]
+    pub(crate) fn mark_as_allocated(&mut self, key: &Range) -> Result<()> {
+        let mut current_node = &mut self.root_node;
+
+        while let Some(current_node_unwrapped) = current_node {
+            match current_node_unwrapped.key.cmp(key) {
+                Ordering::Equal => {
+                    if current_node_unwrapped.node_state != NodeState::Free {
+                        return Err(Error::InvalidStateTransition(
+                            current_node_unwrapped.key,
+                            current_node_unwrapped.node_state,
+                            NodeState::Allocated,
+                        ));
+                    }
+                    current_node_unwrapped.node_state = NodeState::Allocated;
+                    return Ok(());
+                }
+                Ordering::Less => {
+                    current_node = &mut current_node_unwrapped.right;
+                }
+                Ordering::Greater => {
+                    current_node = &mut current_node_unwrapped.left;
+                }
+            }
+        }
+        Err(Error::ResourceNotAvailable)
     }
 }
 
@@ -686,7 +715,43 @@ mod tests {
         assert_eq!(
             tree.insert(Range::new(0x100, 0x200).unwrap(), NodeState::Free)
                 .unwrap_err(),
-            Error::ResourceExhausted
+            Error::ResourceNotAvailable
+        );
+    }
+
+    #[test]
+    fn test_tree_update_invalid_transition() {
+        let range = Range::new(0x100, 0x110).unwrap();
+        let range2 = Range::new(0x200, 0x2FF).unwrap();
+        let mut tree = IntervalTree::new_with_root(Some(Box::new(InnerNode::new(
+            range,
+            NodeState::Allocated,
+        ))));
+        tree.insert(range2, NodeState::Free).unwrap();
+        assert_eq!(
+            tree.mark_as_allocated(&range).unwrap_err(),
+            Error::InvalidStateTransition(range, NodeState::Allocated, NodeState::Allocated)
+        );
+        assert!(tree.mark_as_allocated(&range2).is_ok());
+        assert_eq!(
+            tree.mark_as_allocated(&range2).unwrap_err(),
+            Error::InvalidStateTransition(range2, NodeState::Allocated, NodeState::Allocated)
+        );
+    }
+
+    #[test]
+    fn test_tree_mark_as_allocated() {
+        let range = Range::new(0x100, 0x110).unwrap();
+        let range2 = Range::new(0x200, 0x2FF).unwrap();
+        let mut tree = IntervalTree::new_with_root(Some(Box::new(InnerNode::new(
+            range,
+            NodeState::Allocated,
+        ))));
+        tree.insert(range2, NodeState::Free).unwrap();
+        assert!(tree.mark_as_allocated(&range2).is_ok());
+        assert_eq!(
+            *tree.search(&range2).unwrap(),
+            InnerNode::new(range2, NodeState::Allocated)
         );
     }
 }
