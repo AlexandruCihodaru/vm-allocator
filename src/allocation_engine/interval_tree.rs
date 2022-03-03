@@ -355,6 +355,36 @@ impl InnerNode {
     fn update_cached_height(&mut self) {
         self.height = max(height(&self.left), height(&self.right)) + 1;
     }
+
+    /// Delete `key` from the subtree.
+    ///
+    /// Note: it doesn't return whether the key exists in the subtree, so caller
+    /// need to ensure the logic.
+    #[allow(dead_code)]
+    pub(crate) fn delete(mut self: Box<Self>, key: &Range) -> Option<Box<Self>> {
+        match self.key.cmp(key) {
+            Ordering::Equal => {
+                return self.delete_root();
+            }
+            Ordering::Less => {
+                if let Some(node) = self.right.take() {
+                    let right = node.delete(key);
+                    self.right = right;
+                    self.update_cached_height();
+                    return Some(self.rotate());
+                }
+            }
+            Ordering::Greater => {
+                if let Some(node) = self.left.take() {
+                    let left = node.delete(key);
+                    self.left = left;
+                    self.update_cached_height();
+                    return Some(self.rotate());
+                }
+            }
+        }
+        Some(self)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, PartialOrd, Eq, Ord)]
@@ -453,6 +483,20 @@ impl IntervalTree {
             }
         }
         Err(Error::ResourceNotAvailable)
+    }
+
+    /// Delete `key` from the subtree.
+    ///
+    /// Note: it doesn't return whether the key exists in the subtree, so caller
+    /// need to ensure the logic.
+    #[allow(dead_code)]
+    pub(crate) fn delete(&mut self, key: &Range) -> Result<Option<Box<InnerNode>>> {
+        match self.root_node {
+            None => Err(Error::ResourceNotAvailable),
+            Some(ref node) => {
+                Ok(node.clone().delete(key))
+            }
+        }
     }
 }
 
@@ -674,6 +718,21 @@ mod tests {
         tree.insert(Range::new(0x321, 0x323).unwrap(), NodeState::Free)
             .unwrap();
         assert!(is_balanced(Some(tree.root_node.clone().unwrap())));
+
+        tree.root_node = tree.delete(&Range::new(0x321, 0x323).unwrap()).unwrap();
+        assert_eq!(tree.search(&Range::new(0x321, 0x323).unwrap()), None);
+        tree.root_node = tree.delete(&Range::new(0x314, 0x316).unwrap()).unwrap();
+        tree.root_node = tree.delete(&Range::new(0x317, 0x319).unwrap()).unwrap();
+        assert!(is_balanced(Some(tree.root_node.clone().unwrap())));
+        tree
+            .insert(Range::new(0x80, 0x8F).unwrap(), NodeState::Free)
+            .unwrap();
+        tree
+            .insert(Range::new(0x70, 0x7F).unwrap(), NodeState::Free)
+            .unwrap();
+        tree
+            .insert(Range::new(0x60, 0x6F).unwrap(), NodeState::Free)
+            .unwrap();
     }
 
     #[test]
@@ -752,6 +811,40 @@ mod tests {
         assert_eq!(
             *tree.search(&range2).unwrap(),
             InnerNode::new(range2, NodeState::Allocated)
+        );
+    }
+
+    #[test]
+    fn test_tree_delete() {
+        let left_child = InnerNode::new(Range::new(0x100, 0x110).unwrap(), NodeState::Free);
+        let right_child = InnerNode::new(Range::new(0x300, 0x3FF).unwrap(), NodeState::Free);
+        let mut tree = IntervalTree::new_with_root(Some(Box::new(InnerNode::new(
+            Range::new(0x200, 0x290).unwrap(),
+            NodeState::Free,
+        ))));
+        tree
+            .insert(right_child.key, right_child.node_state)
+            .unwrap();
+        tree.root_node = tree.delete(&Range::new(0x200, 0x290).unwrap()).unwrap();
+        assert!(is_balanced(Some(tree.root_node.clone().unwrap())));
+        tree
+            .insert(Range::new(0x200, 0x290).unwrap(), NodeState::Free)
+            .unwrap();
+        tree.insert(left_child.key, left_child.node_state).unwrap();
+        assert!(is_balanced(Some(tree.root_node.clone().unwrap())));
+
+        assert_eq!(
+            *tree.search(&Range::new(0x100, 0x110).unwrap()).unwrap(),
+            left_child
+        );
+        assert_eq!(*tree.search(&right_child.key).unwrap(), right_child);
+
+        tree.root_node = tree.delete(&Range::new(0x200, 0x290).unwrap()).unwrap();
+        tree.root_node = tree.delete(&Range::new(0x300, 0x3FF).unwrap()).unwrap();
+        assert!(is_balanced(Some(tree.root_node.clone().unwrap())));
+        assert_eq!(
+            *tree.search(&Range::new(0x100, 0x110).unwrap()).unwrap(),
+            left_child
         );
     }
 }
