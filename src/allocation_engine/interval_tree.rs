@@ -252,15 +252,17 @@ impl InnerNode {
         }
     }
 
-    /// Performs a single left rotation on this node.
+    /// Performs a rotation when the left successor is too high.
     #[allow(dead_code)]
-    fn rotate_left(mut self: Box<Self>) -> Option<Box<Self>> {
-        if let Some(mut new_root) = self.right.take() {
-            self.right = new_root.left.take();
-            self.update_cached_height();
-            new_root.left = Some(self);
-            new_root.update_cached_height();
-            return Some(new_root);
+    fn rotate_left_successor(mut self: Box<Self>) -> Option<Box<Self>> {
+        if let Some(left) = self.left.take() {
+            if height(&left.left) < height(&left.right) {
+                self.left = left.rotate_left();
+                self.update_cached_height();
+            } else {
+                self.left = Some(left);
+            }
+            return self.rotate_right();
         }
         None
     }
@@ -278,21 +280,6 @@ impl InnerNode {
         None
     }
 
-    /// Performs a rotation when the left successor is too high.
-    #[allow(dead_code)]
-    fn rotate_left_successor(mut self: Box<Self>) -> Option<Box<Self>> {
-        if let Some(left) = self.left.take() {
-            if height(&left.left) < height(&left.right) {
-                self.left = left.rotate_left();
-                self.update_cached_height();
-            } else {
-                self.left = Some(left);
-            }
-            return self.rotate_right();
-        }
-        None
-    }
-
     /// Performs a rotation when the right successor is too high.
     #[allow(dead_code)]
     fn rotate_right_successor(mut self: Box<Self>) -> Option<Box<Self>> {
@@ -304,6 +291,19 @@ impl InnerNode {
                 self.right = Some(right);
             }
             return self.rotate_left();
+        }
+        None
+    }
+
+    /// Performs a single left rotation on this node.
+    #[allow(dead_code)]
+    fn rotate_left(mut self: Box<Self>) -> Option<Box<Self>> {
+        if let Some(mut new_root) = self.right.take() {
+            self.right = new_root.left.take();
+            self.update_cached_height();
+            new_root.left = Some(self);
+            new_root.update_cached_height();
+            return Some(new_root);
         }
         None
     }
@@ -358,6 +358,43 @@ impl InnerNode {
     fn update_node(mut self: Box<Self>) -> Box<Self> {
         self.update_cached_height();
         self.rotate()
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, PartialOrd, Eq, Ord)]
+pub struct IntervalTree {
+    root_node: Option<Box<InnerNode>>,
+}
+
+impl IntervalTree {
+    /// doc comment
+    #[allow(dead_code)]
+    pub fn new() -> Self {
+        IntervalTree { root_node: None }
+    }
+
+    /// doc comment
+    #[allow(dead_code)]
+    pub fn new_with_root(root_node: Option<Box<InnerNode>>) -> Self {
+        IntervalTree { root_node }
+    }
+
+    /// doc comment
+    #[allow(dead_code)]
+    pub fn search(&self, key: &Range) -> Option<&InnerNode> {
+        match self.root_node {
+            None => None,
+            Some(ref node) => node.search(key),
+        }
+    }
+
+    /// doc comment
+    #[allow(dead_code)]
+    pub fn search_superset(&self, key: &Range) -> Option<&InnerNode> {
+        match self.root_node {
+            None => None,
+            Some(ref node) => node.search_superset(key),
+        }
     }
 }
 
