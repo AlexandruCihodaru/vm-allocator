@@ -332,7 +332,9 @@ impl InnerNode {
             Some(left) => {
                 let (min_node, left) = left.get_new_root();
                 self.left = left;
-                (min_node, Some(self.update_node()))
+                self.update_cached_height();
+                let new_root = self.rotate();
+                (min_node, Some(new_root))
             }
         }
     }
@@ -344,20 +346,14 @@ impl InnerNode {
         let (mut new_root, remaining) = r.get_new_root();
         new_root.left = Some(l);
         new_root.right = remaining;
-        new_root.update_node()
+        new_root.update_cached_height();
+        new_root.rotate()
     }
 
     /// Updates cached information of the node.
     #[allow(dead_code)]
     fn update_cached_height(&mut self) {
         self.height = max(height(&self.left), height(&self.right)) + 1;
-    }
-
-    /// Updates the sub-tree to keep balance.
-    #[allow(dead_code)]
-    fn update_node(mut self: Box<Self>) -> Box<Self> {
-        self.update_cached_height();
-        self.rotate()
     }
 }
 
