@@ -54,13 +54,16 @@ impl AddressAllocator {
         if size == 0 {
             return Err(Error::InvalidSize(size));
         }
+        println!("size {:#x?} is !0", size);
 
         if !alignment.is_power_of_two() || alignment == 0 {
             return Err(Error::InvalidAlignment);
         }
+        println!("alignment {:#x?} is power of two", size);
         let constraint = Constraint::new(size)?
             .set_align(alignment)?
             .set_policy(alloc_policy)?;
+        println!("constraint is done {:#x?}", constraint);
         self.interval_tree.allocate(constraint)
     }
 

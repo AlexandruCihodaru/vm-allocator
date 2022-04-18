@@ -339,12 +339,14 @@ impl InnerNode {
                 let node = self
                     .search_superset(&Range::new(start_address, start_address + 1)?)
                     .ok_or(Error::ResourceNotAvailable)?;
+                println!("found node {:#x?}", node);
                 let end_address = start_address
                     .checked_add(constraint.size())
                     .ok_or(Error::Overflow)?;
                 // We should check that starting from the desired address the
                 // whole memory slot will fit in the selected node.
-                if end_address > node.key.end() {
+                println!("{:#x?} {:#x?}", end_address, node.key.end());
+                if end_address - 1 > node.key.end() {
                     return Err(Error::ResourceNotAvailable);
                 }
                 Ok((node, Range::new(start_address, end_address)?))
@@ -523,11 +525,14 @@ impl IntervalTree {
         // Return ResourceNotAvailable if we can not get a reference to the
         // root node.
         let root = self.root.as_ref().ok_or(Error::ResourceNotAvailable)?;
+        println!("got root!");
         let (node, range) = root.find_candidate(&constraint)?;
+        println!("candidate node {:#x?} {:#x?}", node, range);
         let node_key = node.key;
         // Create a new range starting at an address that is aligned to the
         // value specified by constraint.
         let result = Range::new(range.start(), range.start() + constraint.size - 1)?;
+        println!("candidate result is {:#x?}", result);
 
         // Allocate a resource from the node, no need to split the candidate node.
         if node_key.start() == result.start() && node_key.len() == constraint.size {
@@ -542,19 +547,26 @@ impl IntervalTree {
         // actually the requested memory slot. The last node will have the
         // state NodeState::Free and is what is left from the old node.
         self.delete(&node_key)?;
+        if self.root.is_some() {
+            println!("delete node for other insertions\n {:#x?}\n-----------------------------------------------", self.root.as_ref().unwrap());
+        }
         if result.start > node_key.start() {
             self.insert(
                 Range::new(node_key.start(), result.start() - 1)?,
                 NodeState::Free,
             )?;
+            println!("tree with left node free \n{:#x?}\n-----------------------------------------------", self.root.as_ref().unwrap());
         }
+        
 
         self.insert(result, NodeState::Allocated)?;
+        println!("tree with node allocated \n{:#x?}\n-----------------------------------------------", self.root.as_ref().unwrap());
         if result.end() < node_key.end() {
             self.insert(
                 Range::new(result.end() + 1, node_key.end())?,
                 NodeState::Free,
             )?;
+            println!("tree with right node free \n{:#x?}\n-----------------------------------------------", self.root.as_ref().unwrap());
         }
         Ok(result)
     }
