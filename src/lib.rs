@@ -1,11 +1,22 @@
 // Copyright 2020 Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
-//! Manages system resources that can be allocated to VMs and their devices.
 
 #![deny(missing_docs)]
 
+//! `vm-allocator` is a crate designed to provide allocation and release
+//! strategies that are needed by the VMM during the lifetime of a virtual
+//! machine. Possible resource types that a VMM could allocate using
+//! vm-allocator are MMIO addresses, PIO addresses, GSI numbers, device IDs.
+//! 
+//! This crate offers the following resource managers:
+//! - `AddressAllocator` Manages a range of discrete addresses each of which may
+//! correspond to a peripheral device, disk sector or other logical or physical
+//! entity. This component is a wrapper over `IntervalTree` that adds semantics
+//! to address ranges.
+//! - `IDAllocator` Manages all resources that can be reduced to an integer type
+//! like interrupt numbers or device IDs.
+
 mod address_allocator;
-/// Allocation engine used by address allocator.
 mod allocation_engine;
 mod id_allocator;
 
@@ -17,7 +28,7 @@ use std::cmp::min;
 use std::result;
 use thiserror::Error;
 
-/// Error type for IdAllocator usage.
+/// Errors encountered while handling resource management operations.
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Debug, Error)]
 pub enum Error {
     /// Management operations on desired resource resulted in overflow.
@@ -60,17 +71,16 @@ pub enum Error {
     InvalidSize(u64),
 }
 
-/// Wrapper over std::result::Result
-pub type Result<T> = result::Result<T, Error>;
+// Wrapper over std::result::Result
+type Result<T> = result::Result<T, Error>;
 
 /// A closed interval range [start, end] used to describe a memory slot that
-/// will be assigned to a device by the VMM. This structure represents the key
-/// of the Node object in the interval tree implementation.
+/// will be assigned to a device by the VMM.
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Hash, Ord, Debug)]
 pub struct RangeInclusive {
-    /// Lower boundary of the interval.
+    // Lower boundary of the interval.
     start: u64,
-    /// Upper boundary of the interval.
+    // Upper boundary of the interval.
     end: u64,
 }
 
